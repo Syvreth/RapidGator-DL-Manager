@@ -61,21 +61,26 @@ function browserFailure(proxy, error) {
   return error;
 }
 
-async function captchaState(win) {
-  if (!win || win.isDestroyed()) return 'pending';
+async function captchaState(win, turnstileBroken) {
+  if (!win || win.isDestroyed()) return { kind: 'pending', hasBox: false };
   const root = win.webContents.mainFrame;
-  if (!root) return 'pending';
+  if (!root) return { kind: 'pending', hasBox: false };
   let solved = false;
+  let hasBox = false;
   let text = '';
   try {
     const page = await root.executeJavaScript(`(() => {
       const token = document.querySelector('[name="cf-turnstile-response"]');
+      const frame = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"], iframe[id*="cf-chl"]');
+      const rect = frame ? frame.getBoundingClientRect() : null;
       return {
         solved: Boolean(token && token.value && token.value.length > 20),
+        hasBox: Boolean(rect && rect.width >= 20 && rect.height >= 20),
         text: document.body ? document.body.innerText : '',
       };
     })()`, true);
     solved = Boolean(page?.solved);
+    hasBox = Boolean(page?.hasBox);
     text = page?.text || '';
   } catch {
     text = '';
@@ -87,12 +92,13 @@ async function captchaState(win) {
       // A frame from another site cannot be read.
     }
   }
-  if (solved) return 'solved';
-  if (/select all|choose all/i.test(text)) return 'pictures';
-  if (/verify you are human|i'm not a robot|press and hold/i.test(text)) return 'checkbox';
-  if (/verification code is incorrect|verification failed/i.test(text)) return 'failed';
-  if (/verifying/i.test(text)) return 'verifying';
-  return 'pending';
+  const failed = /verification code is incorrect|verification failed|please fix the following input errors/i.test(text) || turnstileBroken;
+  if (/select all|choose all/i.test(text)) return { kind: 'pictures', hasBox };
+  if (/verify you are human|i'm not a robot|press and hold/i.test(text)) return { kind: 'checkbox', hasBox };
+  if (solved && !failed) return { kind: 'solved', hasBox };
+  if (failed) return { kind: 'failed', hasBox };
+  if (/verifying/i.test(text)) return { kind: 'verifying', hasBox };
+  return { kind: 'pending', hasBox };
 }
 
 async function clickDownload(win) {
@@ -131,14 +137,15 @@ async function clickTurnstile(win) {
   }
 }
 
-async function clickSend(win) {
+async function clickSend(win, force) {
   if (!win || win.isDestroyed()) return false;
   try {
     return await win.webContents.executeJavaScript(`(() => {
+      const force = ${force ? 'true' : 'false'};
       const token = document.querySelector('[name="cf-turnstile-response"]');
-      if (!token || !token.value) return false;
-      const button = document.querySelector('#submit-button')
-        || [...document.querySelectorAll('a,button,input')].find((el) => /send/i.test(el.innerText || el.value || ''));
+      if (!force && (!token || !token.value)) return false;
+      const button = document.querySelector('#submit-button, a#submit-button, button#submit-button')
+        || [...document.querySelectorAll('a,button,input')].find((el) => /^\\s*send\\s*$/i.test(el.innerText || el.value || ''));
       if (!button) return false;
       button.click();
       return true;
@@ -567,6 +574,9 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
       let downloadClicked = false;
       let sawWait = false;
       let clickedBox = false;
+      let sendRetries = 0;
+      let lastSendRetry = 0;
+      let turnstileBroken = false;
       const openedAt = Date.now();
       const reveal = (title) => {
         if (shown || !win || win.isDestroyed()) return;
@@ -581,18 +591,19 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
       };
       const look = async () => {
         if (settled) return;
-        const state = await captchaState(win);
-        if (state === 'verifying') {
+        const state = await captchaState(win, turnstileBroken);
+        const kind = state.kind;
+        if (kind === 'verifying') {
           sawWait = true;
           failedAt = 0;
           return;
         }
-        if (state === 'pictures') {
+        if (kind === 'pictures') {
           failedAt = 0;
           reveal('Pick the pictures, then press Send.');
           return;
         }
-        if (sawWait && !clickedBox && state !== 'solved') {
+        if (sawWait && !clickedBox && kind !== 'solved' && state.hasBox) {
           const did = await clickTurnstile(win);
           if (did) {
             clickedBox = true;
@@ -600,11 +611,11 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
             return;
           }
         }
-        if (state === 'solved') {
+        if (kind === 'solved') {
           failedAt = 0;
           if (!sent) {
             sent = true;
-            const clicked = await clickSend(win);
+            const clicked = await clickSend(win, false);
             if (clicked) log(`Captcha passed on ${proxy.display}. Sending the download.`);
           }
           if (!shown && !downloadClicked) {
@@ -613,18 +624,29 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
           }
           return;
         }
-        if (state === 'checkbox') {
+        if (kind === 'checkbox') {
           failedAt = 0;
-          if (sawWait && !clickedBox) {
+          if (sawWait && !clickedBox && state.hasBox) {
             clickedBox = await clickTurnstile(win);
             if (clickedBox) log(`Clicked the captcha box on ${proxy.display}.`);
           }
           if (!clickedBox) reveal('Click the captcha box, then press Send.');
           return;
         }
-        if (state === 'failed') {
+        if (kind === 'failed') {
           if (!failedAt) failedAt = Date.now();
-          reveal('Click the captcha box, then press Send.');
+          if (!state.hasBox) {
+            const now = Date.now();
+            if (sendRetries < 5 && now - lastSendRetry > 4000) {
+              lastSendRetry = now;
+              sendRetries += 1;
+              const clicked = await clickSend(win, true);
+              if (clicked) log(`Verification failed and the captcha box is gone on ${proxy.display}. Pressing Send again.`);
+            }
+            if (sendRetries < 5) return;
+          } else {
+            reveal('Click the captcha box, then press Send.');
+          }
           if (Date.now() - failedAt < 90000) return;
           log(`Captcha stayed failed on ${proxy.display}. Removing it and starting that file again.`);
           finish(reject, new SocksError(`Captcha verification failed through ${proxy.display}.`));
@@ -637,9 +659,13 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         }
         if (shown || downloadClicked) return;
         markJob(job, { status: 'Downloading', progress: 'Checking captcha', tone: 'yellow' });
-        if (state !== 'verifying' && Date.now() - openedAt > 12000) reveal('Click the captcha box, then press Send.');
-        else if (state === 'verifying' && Date.now() - openedAt > 25000) reveal('Click the captcha box, then press Send.');
+        if (kind !== 'verifying' && Date.now() - openedAt > 12000) reveal('Click the captcha box, then press Send.');
+        else if (kind === 'verifying' && Date.now() - openedAt > 25000) reveal('Click the captcha box, then press Send.');
       };
+      win.webContents.on('console-message', (_event, _level, message) => {
+        const text = String(message || '');
+        if (/TurnstileError|300010|300030|seem to have hung/i.test(text)) turnstileBroken = true;
+      });
       watch = setInterval(look, 1000);
       win.webContents.on('did-finish-load', () => {
         setTimeout(look, 500);
