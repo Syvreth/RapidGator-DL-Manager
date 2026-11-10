@@ -1,0 +1,14 @@
+{
+  "name": "webdl",
+  "productName": "WebDL",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Download manager that uses SOCKS5 proxies and a manual captcha window.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}
