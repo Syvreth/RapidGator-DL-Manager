@@ -439,7 +439,7 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
           session: partition,
           nodeIntegration: false,
           contextIsolation: true,
-          sandbox: true,
+          sandbox: false,
           backgroundThrottling: false,
         },
       });

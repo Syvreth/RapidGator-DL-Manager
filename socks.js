@@ -653,10 +653,19 @@ class SocksBridge {
     if (!reserved) return null;
     try {
       if (generation !== this.generation) return null;
-      return await connectSocks(this.proxy, host, port, { timeoutMs: 12000 });
-    } catch (error) {
-      if (!isAbort(error) && generation === this.generation && this.onStatus) {
-        this.onStatus(`Could not reach ${host}:${port} through ${this.proxy.display}. ${error.message}`);
+      let last = null;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        if (generation !== this.generation) return null;
+        try {
+          return await connectSocks(this.proxy, host, port, { timeoutMs: 12000 });
+        } catch (error) {
+          if (isAbort(error) || generation !== this.generation) return null;
+          last = error;
+          if (attempt === 1) await delay(400);
+        }
+      }
+      if (last && this.onStatus) {
+        this.onStatus(`Could not reach ${host}:${port} through ${this.proxy.display}. ${last.message}`);
       }
       return null;
     } finally {
@@ -666,7 +675,7 @@ class SocksBridge {
   }
 
   reserve(generation) {
-    if (this.live.length + this.reservations < 4) {
+    if (this.reservations < 6) {
       this.reservations += 1;
       return Promise.resolve(true);
     }
@@ -677,14 +686,14 @@ class SocksBridge {
         settled = true;
         clearTimeout(timer);
         this.waiters = this.waiters.filter((item) => item.done !== done);
-        if (allowed && generation === this.generation && this.live.length + this.reservations < 4) {
+        if (allowed && generation === this.generation && this.reservations < 6) {
           this.reservations += 1;
           resolve(true);
           return;
         }
         resolve(false);
       };
-      const timer = setTimeout(() => done(false), 8000);
+      const timer = setTimeout(() => done(false), 20000);
       this.waiters.push({ resolve: () => done(true), done });
     });
   }
