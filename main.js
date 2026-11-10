@@ -50,10 +50,10 @@ function browserFailure(proxy, error) {
   return error;
 }
 
-async function captchaRejected(win) {
-  if (!win || win.isDestroyed()) return false;
+async function captchaState(win) {
+  if (!win || win.isDestroyed()) return 'pending';
   const root = win.webContents.mainFrame;
-  if (!root) return false;
+  if (!root) return 'pending';
   const frames = [root, ...(root.framesInSubtree || [])];
   const chunks = [];
   for (const frame of frames) {
@@ -63,7 +63,10 @@ async function captchaRejected(win) {
       // A frame from another site cannot be read.
     }
   }
-  return /verification code is incorrect|verification failed/i.test(chunks.join('\n'));
+  const text = chunks.join('\n');
+  if (/select all|verify you are human|i'm not a robot|press and hold/i.test(text)) return 'challenge';
+  if (/verification code is incorrect|verification failed/i.test(text)) return 'failed';
+  return 'pending';
 }
 
 function defaultSettings() {
@@ -441,15 +444,28 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         },
       });
       openCaptcha = win;
+      let failedAt = 0;
+      let warned = false;
       const look = async () => {
         if (settled) return;
-        if (!(await captchaRejected(win))) return;
-        log(`Captcha verification failed through ${proxy.display}. Removing it and starting that file again.`);
+        const state = await captchaState(win);
+        if (state !== 'failed') {
+          failedAt = 0;
+          return;
+        }
+        if (!failedAt) failedAt = Date.now();
+        if (!warned && win && !win.isDestroyed()) {
+          warned = true;
+          win.setTitle('Click the captcha box to load the pictures.');
+          log(`Captcha failed the automatic check on ${proxy.display}. Click the box if the pictures appear.`);
+        }
+        if (Date.now() - failedAt < 20000) return;
+        log(`Captcha stayed failed on ${proxy.display}. Removing it and starting that file again.`);
         finish(reject, new SocksError(`Captcha verification failed through ${proxy.display}.`));
       };
       watch = setInterval(look, 1500);
       win.webContents.on('did-finish-load', () => {
-        setTimeout(look, 400);
+        setTimeout(look, 800);
       });
       win.on('closed', () => {
         if (openCaptcha === win) openCaptcha = null;
