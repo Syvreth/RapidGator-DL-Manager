@@ -758,19 +758,20 @@ function splitHost(value, fallbackPort) {
 
 function pump(from, to) {
   const onData = (chunk) => {
+    if (to.destroyed || to.writableEnded) return;
     const ok = to.write(chunk);
     if (!ok) from.pause();
   };
   from.on('data', onData);
-  to.on('drain', () => from.resume());
-  from.on('end', () => {
-    try {
-      to.end();
-    } catch {
-      to.destroy();
-    }
+  to.on('drain', () => {
+    if (!from.destroyed) from.resume();
   });
-  from.on('close', () => to.destroy());
+  from.on('end', () => {
+    if (!to.destroyed && !to.writableEnded) to.end();
+  });
+  from.on('error', () => {
+    if (!to.destroyed) to.destroy();
+  });
 }
 
 module.exports = {

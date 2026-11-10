@@ -20,6 +20,12 @@ const {
   uniquePath,
 } = require('./socks');
 
+app.userAgentFallback = USER_AGENT;
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+app.commandLine.appendSwitch('enable-webgl');
+app.commandLine.appendSwitch('disable-features', 'ThirdPartyStoragePartitioning,TrackingProtection3pcd');
+
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 const proxyPath = () => path.join(app.getPath('userData'), 'proxies.json');
 
@@ -440,6 +446,7 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
           nodeIntegration: false,
           contextIsolation: true,
           sandbox: false,
+          webgl: true,
           backgroundThrottling: false,
         },
       });
