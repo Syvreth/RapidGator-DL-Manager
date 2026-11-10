@@ -42,7 +42,7 @@ function isProxyDead(error) {
   if (['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ECONNABORTED', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN'].includes(code)) {
     return true;
   }
-  return /timed out|timeout|proxy|socks/i.test(error.message || '');
+  return /timed[_ ]out|timeout|err_tunnel|err_proxy|err_connection|err_name_not_resolved|proxy|socks/i.test(`${error.code || ''} ${error.message || ''}`);
 }
 
 function displayHost(host) {
@@ -542,8 +542,8 @@ class SocksBridge {
     this.generation = 0;
     this.live = [];
     this.nextId = 1;
-    this.slots = [];
-    this.activeHands = 0;
+    this.reservations = 0;
+    this.waiters = [];
     this.server = net.createServer((socket) => {
       this.handle(socket).catch((error) => {
         if (!isAbort(error) && this.onStatus) this.onStatus(error.message);
@@ -640,61 +640,58 @@ class SocksBridge {
     const drop = () => {
       this.live = this.live.filter((item) => item !== tunnel);
     };
-    browser.on('close', drop);
-    remote.on('close', drop);
+    const release = () => {
+      drop();
+      this.wake();
+    };
+    browser.on('close', release);
+    remote.on('close', release);
   }
 
   async openRemote(host, port, generation) {
-    let last = null;
-    for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const reserved = await this.reserve(generation);
+    if (!reserved) return null;
+    try {
       if (generation !== this.generation) return null;
-      if (attempt === 3) this.dropOldest(host, false);
-      if (attempt === 4) this.dropOldest(host, true);
-      try {
-        await this.takeSlot();
-        try {
-          if (generation !== this.generation) return null;
-          return await connectSocks(this.proxy, host, port, { timeoutMs: 10000 });
-        } finally {
-          this.freeSlot();
-        }
-      } catch (error) {
-        if (isAbort(error) || generation !== this.generation) return null;
-        last = error;
-        if (attempt === 4) break;
-        await delay(250).catch(() => null);
+      return await connectSocks(this.proxy, host, port, { timeoutMs: 12000 });
+    } catch (error) {
+      if (!isAbort(error) && generation === this.generation && this.onStatus) {
+        this.onStatus(`Could not reach ${host}:${port} through ${this.proxy.display}. ${error.message}`);
       }
+      return null;
+    } finally {
+      this.reservations = Math.max(0, this.reservations - 1);
+      this.wake();
     }
-    if (last && this.onStatus) {
-      this.onStatus(`Could not reach ${host}:${port} through ${this.proxy.display}. ${last.message}`);
-    }
-    return null;
   }
 
-  takeSlot() {
-    if (this.activeHands < 3) {
-      this.activeHands += 1;
-      return Promise.resolve();
+  reserve(generation) {
+    if (this.live.length + this.reservations < 4) {
+      this.reservations += 1;
+      return Promise.resolve(true);
     }
-    return new Promise((resolve) => this.slots.push(resolve));
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (allowed) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.waiters = this.waiters.filter((item) => item.done !== done);
+        if (allowed && generation === this.generation && this.live.length + this.reservations < 4) {
+          this.reservations += 1;
+          resolve(true);
+          return;
+        }
+        resolve(false);
+      };
+      const timer = setTimeout(() => done(false), 8000);
+      this.waiters.push({ resolve: () => done(true), done });
+    });
   }
 
-  freeSlot() {
-    const next = this.slots.shift();
-    if (next) next();
-    else this.activeHands = Math.max(0, this.activeHands - 1);
-  }
-
-  dropOldest(host, sameHost) {
-    const wanted = host.toLowerCase();
-    let victim = null;
-    for (const tunnel of this.live) {
-      const matches = sameHost ? tunnel.host.toLowerCase() === wanted : tunnel.host.toLowerCase() !== wanted;
-      if (matches && (!victim || tunnel.id < victim.id)) victim = tunnel;
-    }
-    if (!victim) return;
-    this.live = this.live.filter((tunnel) => tunnel !== victim);
-    victim.destroy();
+  wake() {
+    const next = this.waiters.shift();
+    if (next) next.resolve(true);
   }
 }
 

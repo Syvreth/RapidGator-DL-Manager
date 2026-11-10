@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('webdl', {
   fetchLists: () => ipcRenderer.invoke('proxies:fetch'),
   test: (payload) => ipcRenderer.invoke('proxies:test', payload),
   forget: () => ipcRenderer.invoke('proxies:forget'),
+  forgetWorking: () => ipcRenderer.invoke('proxies:forget-working'),
   saveProxies: (payload) => ipcRenderer.invoke('proxies:save', payload),
   saveSettings: (payload) => ipcRenderer.invoke('settings:save', payload),
   pickFolder: () => ipcRenderer.invoke('folder:pick'),

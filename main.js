@@ -1,3 +1,4 @@
+const { setMaxListeners } = require('events');
 const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -8,6 +9,7 @@ const { isRapidgatorFile, pushRapidgator } = require('./rapidgator');
 const {
   PageChallenge,
   SocksBridge,
+  SocksError,
   USER_AGENT,
   abortError,
   downloadToFile,
@@ -31,6 +33,38 @@ let testAbort = null;
 let openCaptcha = null;
 let captchaTail = Promise.resolve();
 let progressTimer = null;
+
+function stopSignal() {
+  const controller = new AbortController();
+  setMaxListeners(0, controller.signal);
+  return controller;
+}
+
+function browserFailure(proxy, error) {
+  if (!error || error.skipped || isAbort(error) || error.isProxy) return error;
+  const text = `${error.code || ''} ${error.message || ''}`;
+  if (/ERR_ABORTED/.test(text)) return null;
+  if (/TIMED_OUT|TUNNEL|PROXY|CONNECTION_|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|EMPTY_RESPONSE|INTERNET_DISCONNECTED|SOCKS/i.test(text)) {
+    return new SocksError(`The captcha page did not open through ${proxy.display}.`);
+  }
+  return error;
+}
+
+async function captchaRejected(win) {
+  if (!win || win.isDestroyed()) return false;
+  const root = win.webContents.mainFrame;
+  if (!root) return false;
+  const frames = [root, ...(root.framesInSubtree || [])];
+  const chunks = [];
+  for (const frame of frames) {
+    try {
+      chunks.push(await frame.executeJavaScript('document.body ? document.body.innerText : ""', true));
+    } catch {
+      // A frame from another site cannot be read.
+    }
+  }
+  return /verification code is incorrect|verification failed/i.test(chunks.join('\n'));
+}
 
 function defaultSettings() {
   return {
@@ -340,9 +374,11 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
     const bridge = new SocksBridge(proxy, (message) => log(message));
     let settled = false;
     let win = null;
+    let watch = null;
     const finish = (settle, value) => {
       if (settled) return;
       settled = true;
+      if (watch) clearInterval(watch);
       signal?.removeEventListener('abort', onAbort);
       try {
         bridge.close();
@@ -358,7 +394,12 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
 
     bridge.start().then(async (port) => {
       const partition = session.fromPartition(`captcha-${job.id}`);
-      await partition.setProxy({ proxyRules: `http://127.0.0.1:${port}` });
+      await partition.setProxy({
+        mode: 'fixed_servers',
+        proxyRules: `http=127.0.0.1:${port};https=127.0.0.1:${port}`,
+        proxyBypassRules: '<local>',
+      });
+      await partition.closeAllConnections();
       partition.setUserAgent(USER_AGENT);
       await applyCookies(partition, cookie);
       partition.on('will-download', (_event, item) => {
@@ -400,6 +441,16 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         },
       });
       openCaptcha = win;
+      const look = async () => {
+        if (settled) return;
+        if (!(await captchaRejected(win))) return;
+        log(`Captcha verification failed through ${proxy.display}. Removing it and starting that file again.`);
+        finish(reject, new SocksError(`Captcha verification failed through ${proxy.display}.`));
+      };
+      watch = setInterval(look, 1500);
+      win.webContents.on('did-finish-load', () => {
+        setTimeout(look, 400);
+      });
       win.on('closed', () => {
         if (openCaptcha === win) openCaptcha = null;
         const skipped = new Error('Skipped');
@@ -418,14 +469,17 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         }
         log(`Captcha page did not load (${description}).`);
         if (win && !win.isDestroyed()) win.setTitle(`Page did not load (${description}).`);
+        const failure = browserFailure(proxy, { code: description, message: description });
+        if (failure?.isProxy) finish(reject, failure);
       });
       log(`Captcha ${url} through ${proxy.display}`);
       try {
         await win.loadURL(url);
         if (!win.isDestroyed()) win.setTitle('Submit the captcha, then click the download button.');
       } catch (error) {
-        if (String(error?.code || error?.message || '').includes('ERR_ABORTED')) return;
-        finish(reject, error.isProxy ? error : new Error(error.message || 'The captcha window did not open.'));
+        const failure = browserFailure(proxy, error);
+        if (!failure) return;
+        finish(reject, failure instanceof Error ? failure : new Error('The captcha window did not open.'));
       }
     }).catch((error) => finish(reject, error));
   });
@@ -611,7 +665,7 @@ function onStart(payload) {
   fs.mkdirSync(settings.folder, { recursive: true });
   const created = links.map(makeJob);
   jobs.push(...created);
-  const controller = new AbortController();
+  const controller = stopSignal();
   const run = {
     controller,
     signal: controller.signal,
@@ -644,7 +698,7 @@ function onCancel() {
 
 async function onFetch() {
   if (sessionRun || testing) return { ok: false, message: 'Wait until the current work finishes.' };
-  const controller = new AbortController();
+  const controller = stopSignal();
   log('Fetching free proxy lists.');
   try {
     const results = await fetchLists(controller.signal);
@@ -710,7 +764,7 @@ async function onTest(payload) {
   if (!pending.length) return { ok: false, message: 'The untested list is empty.' };
 
   testing = true;
-  testAbort = new AbortController();
+  testAbort = stopSignal();
   sendBusy();
   const started = Date.now();
   let done = 0;
@@ -767,6 +821,15 @@ function registerIpc() {
     saveProxyFile();
     sendProxies();
     log('Forgot rejected proxies.');
+    return { ok: true };
+  });
+  ipcMain.handle('proxies:forget-working', () => {
+    if (sessionRun || testing) return { ok: false, message: 'Wait until the current work finishes.' };
+    const count = proxies.working.length;
+    proxies.working = [];
+    saveProxyFile();
+    sendProxies();
+    log(`Forgot ${count.toLocaleString()} working proxies.`);
     return { ok: true };
   });
   ipcMain.handle('proxies:save', (_event, payload) => {

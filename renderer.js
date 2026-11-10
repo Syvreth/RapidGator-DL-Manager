@@ -13,6 +13,7 @@ const working = document.querySelector('#working');
 const fetchButton = document.querySelector('#fetch');
 const testButton = document.querySelector('#test');
 const forgetButton = document.querySelector('#forget');
+const forgetWorkingButton = document.querySelector('#forget-working');
 const bar = document.querySelector('#bar');
 const check = document.querySelector('#check');
 const counts = document.querySelector('#counts');
@@ -52,6 +53,7 @@ function setBusy(busy, testing) {
   working.disabled = busy || testing;
   fetchButton.disabled = busy || testing;
   forgetButton.disabled = busy || testing;
+  forgetWorkingButton.disabled = busy || testing;
   testButton.disabled = busy;
   testButton.textContent = testing ? 'Stop test' : 'Test proxies';
 }
@@ -153,6 +155,7 @@ cancel.addEventListener('click', () => window.webdl.cancel());
 fetchButton.addEventListener('click', () => window.webdl.fetchLists());
 testButton.addEventListener('click', () => window.webdl.test(formPayload()));
 forgetButton.addEventListener('click', () => window.webdl.forget());
+forgetWorkingButton.addEventListener('click', () => window.webdl.forgetWorking());
 openFolder.addEventListener('click', () => window.webdl.openFolder(folder.value.trim()));
 browse.addEventListener('click', async () => {
   const picked = await window.webdl.pickFolder();
