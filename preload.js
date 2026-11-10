@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('webdl', {
   pickFolder: () => ipcRenderer.invoke('folder:pick'),
   openFolder: (folder) => ipcRenderer.invoke('folder:open', folder),
   openFile: (file) => ipcRenderer.invoke('file:open', file),
+  showJob: (id) => ipcRenderer.invoke('job:show', id),
   onEvent: (handler) => {
     const listener = (_event, payload) => handler(payload);
     ipcRenderer.on('event', listener);

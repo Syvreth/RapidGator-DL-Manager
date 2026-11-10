@@ -1,4 +1,4 @@
-const { connectSocks, formatLine, isAbort, parseProxy } = require('./socks');
+const { addressKey, connectSocks, formatLine, isAbort, parseProxy } = require('./socks');
 
 const SOURCES = [
   ['monosans', 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt'],
@@ -31,7 +31,7 @@ function parseLines(text) {
       invalid += 1;
       continue;
     }
-    const key = proxy.display.toLowerCase();
+    const key = addressKey(proxy);
     if (seen.has(key)) continue;
     seen.add(key);
     proxies.push(proxy);

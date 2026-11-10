@@ -71,6 +71,16 @@ function parseProxy(text) {
   };
 }
 
+function addressKey(proxy) {
+  return String(proxy?.host || '').trim().toLowerCase();
+}
+
+function storedAddressKey(value) {
+  const proxy = parseProxy(value);
+  if (proxy) return addressKey(proxy);
+  return String(value || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').trim().toLowerCase();
+}
+
 function formatLine(proxy) {
   if (proxy.username) {
     const user = encodeURIComponent(proxy.username);
@@ -783,6 +793,8 @@ module.exports = {
   isProxyDead,
   parseProxy,
   formatLine,
+  addressKey,
+  storedAddressKey,
   delay,
   connectSocks,
   requestText,

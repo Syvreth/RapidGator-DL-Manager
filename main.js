@@ -14,6 +14,9 @@ const {
   abortError,
   downloadToFile,
   formatLine,
+  addressKey,
+  storedAddressKey,
+  delay,
   isAbort,
   isProxyDead,
   safeName,
@@ -35,9 +38,11 @@ let proxies = { untested: [], working: [], failed: new Set() };
 let settings = defaultSettings();
 let sessionRun = null;
 let testing = false;
+let testingList = 'untested';
 let testAbort = null;
-let openCaptcha = null;
-let captchaTail = Promise.resolve();
+let openCaptcha = new Map();
+const rapidgatorReady = new Map();
+const RAPIDGATOR_GAP_MS = 120 * 60 * 1000;
 let progressTimer = null;
 
 function stopSignal() {
@@ -60,19 +65,87 @@ async function captchaState(win) {
   if (!win || win.isDestroyed()) return 'pending';
   const root = win.webContents.mainFrame;
   if (!root) return 'pending';
-  const frames = [root, ...(root.framesInSubtree || [])];
-  const chunks = [];
-  for (const frame of frames) {
+  let solved = false;
+  let text = '';
+  try {
+    const page = await root.executeJavaScript(`(() => {
+      const token = document.querySelector('[name="cf-turnstile-response"]');
+      return {
+        solved: Boolean(token && token.value && token.value.length > 20),
+        text: document.body ? document.body.innerText : '',
+      };
+    })()`, true);
+    solved = Boolean(page?.solved);
+    text = page?.text || '';
+  } catch {
+    text = '';
+  }
+  for (const frame of root.framesInSubtree || []) {
     try {
-      chunks.push(await frame.executeJavaScript('document.body ? document.body.innerText : ""', true));
+      text += `\n${await frame.executeJavaScript('document.body ? document.body.innerText : ""', true)}`;
     } catch {
       // A frame from another site cannot be read.
     }
   }
-  const text = chunks.join('\n');
-  if (/select all|verify you are human|i'm not a robot|press and hold/i.test(text)) return 'challenge';
+  if (solved) return 'solved';
+  if (/select all|choose all/i.test(text)) return 'pictures';
+  if (/verify you are human|i'm not a robot|press and hold/i.test(text)) return 'checkbox';
   if (/verification code is incorrect|verification failed/i.test(text)) return 'failed';
+  if (/verifying/i.test(text)) return 'verifying';
   return 'pending';
+}
+
+async function clickDownload(win) {
+  if (!win || win.isDestroyed()) return false;
+  try {
+    return await win.webContents.executeJavaScript(`(() => {
+      const button = document.querySelector('a.btn-download, .btn-download')
+        || [...document.querySelectorAll('a,button')].find((el) => /click here to download/i.test(el.innerText || ''));
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`, true);
+  } catch {
+    return false;
+  }
+}
+
+async function clickTurnstile(win) {
+  if (!win || win.isDestroyed()) return false;
+  try {
+    const box = await win.webContents.executeJavaScript(`(() => {
+      const frame = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], iframe[title*="Cloudflare"]');
+      if (!frame) return null;
+      const rect = frame.getBoundingClientRect();
+      if (rect.width < 20 || rect.height < 20) return null;
+      return { x: rect.left + 28, y: rect.top + (rect.height / 2) };
+    })()`, true);
+    if (!box) return false;
+    const point = { x: Math.round(box.x), y: Math.round(box.y) };
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y });
+    win.webContents.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    win.webContents.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function clickSend(win) {
+  if (!win || win.isDestroyed()) return false;
+  try {
+    return await win.webContents.executeJavaScript(`(() => {
+      const token = document.querySelector('[name="cf-turnstile-response"]');
+      if (!token || !token.value) return false;
+      const button = document.querySelector('#submit-button')
+        || [...document.querySelectorAll('a,button,input')].find((el) => /send/i.test(el.innerText || el.value || ''));
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`, true);
+  } catch {
+    return false;
+  }
 }
 
 function defaultSettings() {
@@ -121,6 +194,7 @@ function snapshot() {
     jobs,
     busy: Boolean(sessionRun),
     testing,
+    testingList,
     summary: summaryText(),
   };
 }
@@ -152,7 +226,7 @@ function sendProxies() {
 }
 
 function sendBusy() {
-  send({ type: 'busy', busy: Boolean(sessionRun), testing });
+  send({ type: 'busy', busy: Boolean(sessionRun), testing, testingList });
 }
 
 function markJob(job, patch) {
@@ -186,15 +260,19 @@ function saveSettings(next = settings) {
 function loadProxies() {
   try {
     const data = JSON.parse(fs.readFileSync(proxyPath(), 'utf8'));
-    const failed = new Set((data.Failed || []).map((item) => String(item).toLowerCase()));
+    const failed = new Set((data.Failed || []).map((item) => storedAddressKey(item)).filter(Boolean));
     const working = parseLines((data.Working || []).join('\n')).proxies;
-    for (const proxy of working) failed.delete(proxy.display.toLowerCase());
-    const workingKeys = new Set(working.map((proxy) => proxy.display.toLowerCase()));
+    for (const proxy of working) failed.delete(addressKey(proxy));
+    const workingKeys = new Set(working.map((proxy) => addressKey(proxy)));
     const untested = parseLines((data.Untested || []).join('\n')).proxies.filter((proxy) => {
-      const key = proxy.display.toLowerCase();
+      const key = addressKey(proxy);
       return !failed.has(key) && !workingKeys.has(key);
     });
     proxies = { untested, working, failed };
+    rapidgatorReady.clear();
+    for (const [key, time] of Object.entries(data.RapidgatorReady || {})) {
+      if (Number(time) > Date.now()) rapidgatorReady.set(key, Number(time));
+    }
   } catch {
     proxies = { untested: [], working: [], failed: new Set() };
   }
@@ -205,6 +283,7 @@ function saveProxyFile() {
     Untested: proxies.untested.map(formatLine),
     Working: proxies.working.map(formatLine),
     Failed: [...proxies.failed],
+    RapidgatorReady: Object.fromEntries([...rapidgatorReady].filter(([, time]) => time > Date.now())),
   };
   fs.mkdirSync(path.dirname(proxyPath()), { recursive: true });
   const temporary = `${proxyPath()}.tmp`;
@@ -215,21 +294,38 @@ function saveProxyFile() {
 function applyProxyText(untestedText, workingText) {
   if (sessionRun || testing) return;
   const working = parseLines(workingText).proxies;
-  const workingKeys = new Set(working.map((proxy) => proxy.display.toLowerCase()));
+  const workingKeys = new Set(working.map((proxy) => addressKey(proxy)));
   for (const key of workingKeys) proxies.failed.delete(key);
-  const untested = parseLines(untestedText).proxies.filter((proxy) => !workingKeys.has(proxy.display.toLowerCase()));
-  proxies.untested = untested.filter((proxy) => !proxies.failed.has(proxy.display.toLowerCase()));
+  const untested = parseLines(untestedText).proxies.filter((proxy) => !workingKeys.has(addressKey(proxy)));
+  proxies.untested = untested.filter((proxy) => !proxies.failed.has(addressKey(proxy)));
   proxies.working = working;
   saveProxyFile();
 }
 
+function rememberRapidgatorDownload(proxy) {
+  rapidgatorReady.set(addressKey(proxy), Date.now() + RAPIDGATOR_GAP_MS);
+  saveProxyFile();
+  log(`${addressKey(proxy)} downloaded a Rapidgator file. That address waits 120 minutes.`);
+}
+
+function cooldownLeft(proxy) {
+  return Math.max(0, (rapidgatorReady.get(addressKey(proxy)) || 0) - Date.now());
+}
+
+function formatCooldown(ms) {
+  const minutes = Math.ceil(ms / 60000);
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  return `${minutes}m`;
+}
+
 function forgetWorking(proxy) {
-  const key = proxy.display.toLowerCase();
-  proxies.working = proxies.working.filter((item) => item.display.toLowerCase() !== key);
+  const key = addressKey(proxy);
+  proxies.working = proxies.working.filter((item) => addressKey(item) !== key);
+  proxies.untested = proxies.untested.filter((item) => addressKey(item) !== key);
   proxies.failed.add(key);
   saveProxyFile();
   sendProxies();
-  log(`${proxy.display} was removed from the working list.`);
+  log(`${key} was removed from the working list.`);
 }
 
 function extractLinks(text) {
@@ -330,12 +426,25 @@ class ProxyPool {
   }
 
   discard(entry) {
+    if (!entry || entry.discarded) return;
     entry.discarded = true;
     this.alive -= 1;
+    this.dropAddress(addressKey(entry.proxy), entry);
     if (this.alive <= 0) {
       const waiters = this.waiters.splice(0);
       for (const waiter of waiters) waiter.reject(new Error('No working proxies left'));
     }
+  }
+
+  dropAddress(key, current) {
+    this.free = this.free.filter((item) => {
+      if (item === current || addressKey(item.proxy) !== key) return true;
+      if (!item.discarded) {
+        item.discarded = true;
+        this.alive -= 1;
+      }
+      return false;
+    });
   }
 }
 
@@ -368,10 +477,8 @@ function createWindow() {
   });
 }
 
-async function showCaptcha({ proxy, url, cookie, folder, signal, job }) {
-  const result = captchaTail.then(() => openCaptchaWindow({ proxy, url, cookie, folder, signal, job }));
-  captchaTail = result.then(() => {}, () => {});
-  return result;
+async function showCaptcha(options) {
+  return openCaptchaWindow(options);
 }
 
 function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
@@ -395,7 +502,7 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         // The bridge is already stopped.
       }
       if (win && !win.isDestroyed()) win.close();
-      if (openCaptcha === win) openCaptcha = null;
+      openCaptcha.delete(job.id);
       settle(value);
     };
     const onAbort = () => finish(reject, abortError());
@@ -438,6 +545,9 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
       win = new BrowserWindow({
         width: 1040,
         height: 780,
+        show: true,
+        opacity: 0,
+        skipTaskbar: true,
         title: `Solve captcha — ${proxy.display}`,
         backgroundColor: '#ffffff',
         autoHideMenuBar: true,
@@ -450,32 +560,92 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
           backgroundThrottling: false,
         },
       });
-      openCaptcha = win;
+      openCaptcha.set(job.id, win);
       let failedAt = 0;
-      let warned = false;
+      let shown = false;
+      let sent = false;
+      let downloadClicked = false;
+      let sawWait = false;
+      let clickedBox = false;
+      const openedAt = Date.now();
+      const reveal = (title) => {
+        if (shown || !win || win.isDestroyed()) return;
+        shown = true;
+        win.setOpacity(1);
+        win.setSkipTaskbar(false);
+        win.setTitle(title);
+        win.show();
+        win.focus();
+        markJob(job, { status: 'Downloading', progress: 'Waiting for captcha', tone: 'yellow' });
+        log(`Captcha needs you on ${proxy.display}.`);
+      };
       const look = async () => {
         if (settled) return;
         const state = await captchaState(win);
-        if (state !== 'failed') {
+        if (state === 'verifying') {
+          sawWait = true;
           failedAt = 0;
           return;
         }
-        if (!failedAt) failedAt = Date.now();
-        if (!warned && win && !win.isDestroyed()) {
-          warned = true;
-          win.setTitle('Click the captcha box to load the pictures.');
-          log(`Captcha failed the automatic check on ${proxy.display}. Click the box if the pictures appear.`);
+        if (state === 'pictures') {
+          failedAt = 0;
+          reveal('Pick the pictures, then press Send.');
+          return;
         }
-        if (Date.now() - failedAt < 20000) return;
-        log(`Captcha stayed failed on ${proxy.display}. Removing it and starting that file again.`);
-        finish(reject, new SocksError(`Captcha verification failed through ${proxy.display}.`));
+        if (sawWait && !clickedBox && state !== 'solved') {
+          const did = await clickTurnstile(win);
+          if (did) {
+            clickedBox = true;
+            log(`Clicked the captcha box on ${proxy.display}.`);
+            return;
+          }
+        }
+        if (state === 'solved') {
+          failedAt = 0;
+          if (!sent) {
+            sent = true;
+            const clicked = await clickSend(win);
+            if (clicked) log(`Captcha passed on ${proxy.display}. Sending the download.`);
+          }
+          if (!shown && !downloadClicked) {
+            downloadClicked = await clickDownload(win);
+            if (downloadClicked) log(`Starting the file through ${proxy.display}.`);
+          }
+          return;
+        }
+        if (state === 'checkbox') {
+          failedAt = 0;
+          if (sawWait && !clickedBox) {
+            clickedBox = await clickTurnstile(win);
+            if (clickedBox) log(`Clicked the captcha box on ${proxy.display}.`);
+          }
+          if (!clickedBox) reveal('Click the captcha box, then press Send.');
+          return;
+        }
+        if (state === 'failed') {
+          if (!failedAt) failedAt = Date.now();
+          reveal('Click the captcha box, then press Send.');
+          if (Date.now() - failedAt < 90000) return;
+          log(`Captcha stayed failed on ${proxy.display}. Removing it and starting that file again.`);
+          finish(reject, new SocksError(`Captcha verification failed through ${proxy.display}.`));
+          return;
+        }
+        failedAt = 0;
+        if (!shown && !downloadClicked) {
+          downloadClicked = await clickDownload(win);
+          if (downloadClicked) log(`Starting the file through ${proxy.display}.`);
+        }
+        if (shown || downloadClicked) return;
+        markJob(job, { status: 'Downloading', progress: 'Checking captcha', tone: 'yellow' });
+        if (state !== 'verifying' && Date.now() - openedAt > 12000) reveal('Click the captcha box, then press Send.');
+        else if (state === 'verifying' && Date.now() - openedAt > 25000) reveal('Click the captcha box, then press Send.');
       };
-      watch = setInterval(look, 1500);
+      watch = setInterval(look, 1000);
       win.webContents.on('did-finish-load', () => {
-        setTimeout(look, 800);
+        setTimeout(look, 500);
       });
       win.on('closed', () => {
-        if (openCaptcha === win) openCaptcha = null;
+        openCaptcha.delete(job.id);
         const skipped = new Error('Skipped');
         skipped.skipped = true;
         finish(reject, skipped);
@@ -496,9 +666,9 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         if (failure?.isProxy) finish(reject, failure);
       });
       log(`Captcha ${url} through ${proxy.display}`);
+      markJob(job, { status: 'Downloading', progress: 'Checking captcha', tone: 'yellow' });
       try {
         await win.loadURL(url);
-        if (!win.isDestroyed()) win.setTitle('Submit the captcha, then click the download button.');
       } catch (error) {
         const failure = browserFailure(proxy, error);
         if (!failure) return;
@@ -587,9 +757,19 @@ async function execute(run, job) {
     }
 
     markJob(job, { proxy: entry.proxy.display, status: 'Downloading', progress: 'Connecting', tone: 'yellow' });
+    if (isRapidgatorFile(job.url)) {
+      const waitMs = cooldownLeft(entry.proxy);
+      if (waitMs > 0) {
+        markJob(job, { status: 'Downloading', progress: `Rapidgator limit ${formatCooldown(waitMs)}`, tone: 'yellow' });
+        log(`${addressKey(entry.proxy)} already downloaded. Waiting ${formatCooldown(waitMs)} before another Rapidgator file.`);
+        run.pool.release(entry, waitMs);
+        continue;
+      }
+    }
     log(`${entry.proxy.display} → ${job.url}`);
     try {
       const saved = await downloadJob(run, job, entry.proxy);
+      if (isRapidgatorFile(job.url)) rememberRapidgatorDownload(entry.proxy);
       markJob(job, { status: 'Saved', progress: 'Saved', tone: 'green', filePath: saved });
       log(`Saved ${saved}`);
       run.pool.release(entry, run.reuse * 1000);
@@ -714,7 +894,9 @@ function onCancel() {
   if (!run) return { ok: true };
   run.controller.abort();
   run.queue.close();
-  if (openCaptcha && !openCaptcha.isDestroyed()) openCaptcha.close();
+  for (const win of openCaptcha.values()) {
+    if (win && !win.isDestroyed()) win.close();
+  }
   log('Cancel requested.');
   return { ok: true };
 }
@@ -726,8 +908,8 @@ async function onFetch() {
   try {
     const results = await fetchLists(controller.signal);
     const known = new Set([
-      ...proxies.untested.map((proxy) => proxy.display.toLowerCase()),
-      ...proxies.working.map((proxy) => proxy.display.toLowerCase()),
+      ...proxies.untested.map((proxy) => addressKey(proxy)),
+      ...proxies.working.map((proxy) => addressKey(proxy)),
       ...proxies.failed,
     ]);
     let added = 0;
@@ -738,7 +920,7 @@ async function onFetch() {
         continue;
       }
       for (const proxy of parseLines(result.text).proxies) {
-        const key = proxy.display.toLowerCase();
+        const key = addressKey(proxy);
         if (known.has(key)) continue;
         known.add(key);
         proxies.untested.push(proxy);
@@ -782,11 +964,15 @@ async function onTest(payload) {
     testAbort.abort();
     return { ok: true };
   }
+  const source = payload?.list === 'working' ? 'working' : 'untested';
   applyProxyText(payload?.untested, payload?.working);
-  const pending = [...proxies.untested];
-  if (!pending.length) return { ok: false, message: 'The untested list is empty.' };
+  const pending = source === 'working' ? [...proxies.working] : [...proxies.untested];
+  if (!pending.length) {
+    return { ok: false, message: source === 'working' ? 'The working list is empty.' : 'The untested list is empty.' };
+  }
 
   testing = true;
+  testingList = source;
   testAbort = stopSignal();
   sendBusy();
   const started = Date.now();
@@ -799,21 +985,35 @@ async function onTest(payload) {
     emitProgress(done, total, passed, started, true);
     sendProxies();
   }, 400);
-  log(`Testing ${total.toLocaleString()} proxies.`);
+  log(`Testing ${total.toLocaleString()} ${source} proxies.`);
 
   try {
     await testProxies(pending, {
       signal: testAbort.signal,
       onEach: (proxy, ok) => {
         done += 1;
-        const key = proxy.display.toLowerCase();
-        proxies.untested = proxies.untested.filter((item) => item.display.toLowerCase() !== key);
+        const key = addressKey(proxy);
+        if (source === 'working') {
+          if (ok) {
+            passed += 1;
+            proxies.failed.delete(key);
+            return;
+          }
+          proxies.failed.add(key);
+          proxies.working = proxies.working.filter((item) => addressKey(item) !== key);
+          proxies.untested = proxies.untested.filter((item) => addressKey(item) !== key);
+          return;
+        }
+        proxies.untested = proxies.untested.filter((item) => addressKey(item) !== key);
         if (ok) {
-          passed += 1;
           proxies.failed.delete(key);
-          if (!proxies.working.some((item) => item.display.toLowerCase() === key)) proxies.working.push(proxy);
+          if (!proxies.working.some((item) => addressKey(item) === key)) {
+            proxies.working.push(proxy);
+            passed += 1;
+          }
         } else {
           proxies.failed.add(key);
+          proxies.working = proxies.working.filter((item) => addressKey(item) !== key);
         }
       },
     });
@@ -873,6 +1073,19 @@ function registerIpc() {
     const target = folder || settings.folder;
     fs.mkdirSync(target, { recursive: true });
     return shell.openPath(target);
+  });
+  ipcMain.handle('job:show', (_event, id) => {
+    const win = openCaptcha.get(id);
+    if (win && !win.isDestroyed()) {
+      win.setOpacity(1);
+      win.setSkipTaskbar(false);
+      win.show();
+      win.focus();
+      return { ok: true };
+    }
+    const job = jobs.find((item) => item.id === id);
+    if (job?.filePath) return shell.openPath(job.filePath);
+    return { ok: false };
   });
   ipcMain.handle('file:open', (_event, file) => shell.openPath(file));
 }

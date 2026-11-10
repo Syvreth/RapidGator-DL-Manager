@@ -44,6 +44,7 @@
     th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #e4e9ef; vertical-align: top; }
     th { position: sticky; top: 0; background: #f7f9fb; font-weight: 600; }
     td.link { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tbody tr { cursor: pointer; }
     tr.yellow { background: #f6e3a1; }
     tr.green { background: #b7e4be; cursor: pointer; }
     tr.red { background: #f3c1c1; }
@@ -106,7 +107,8 @@
     <section class="panel">
       <div class="row">
         <button id="fetch" type="button">Fetch free lists</button>
-        <button id="test" type="button">Test proxies</button>
+        <button id="test" type="button">Test UnTested</button>
+        <button id="test-working" type="button">Test Working</button>
         <button id="forget" type="button">Forget failures</button>
         <button id="forget-working" type="button">Forget working</button>
         <progress id="bar" max="100" value="0" hidden></progress>

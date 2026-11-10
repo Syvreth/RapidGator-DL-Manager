@@ -12,6 +12,7 @@ const untested = document.querySelector('#untested');
 const working = document.querySelector('#working');
 const fetchButton = document.querySelector('#fetch');
 const testButton = document.querySelector('#test');
+const testWorkingButton = document.querySelector('#test-working');
 const forgetButton = document.querySelector('#forget');
 const forgetWorkingButton = document.querySelector('#forget-working');
 const bar = document.querySelector('#bar');
@@ -40,7 +41,7 @@ function setText(box, value) {
   box.scrollTop = top;
 }
 
-function setBusy(busy, testing) {
+function setBusy(busy, testing, testingList) {
   start.textContent = busy ? 'Add to queue' : 'Start downloads';
   cancel.disabled = !busy;
   links.readOnly = false;
@@ -54,8 +55,12 @@ function setBusy(busy, testing) {
   fetchButton.disabled = busy || testing;
   forgetButton.disabled = busy || testing;
   forgetWorkingButton.disabled = busy || testing;
-  testButton.disabled = busy;
-  testButton.textContent = testing ? 'Stop test' : 'Test proxies';
+  const testingUntested = testing && testingList !== 'working';
+  const testingWorking = testing && testingList === 'working';
+  testButton.disabled = busy || (testing && !testingUntested);
+  testWorkingButton.disabled = busy || (testing && !testingWorking);
+  testButton.textContent = testingUntested ? 'Stop test' : 'Test UnTested';
+  testWorkingButton.textContent = testingWorking ? 'Stop test' : 'Test Working';
 }
 
 function renderJobs(list) {
@@ -63,7 +68,6 @@ function renderJobs(list) {
   for (const job of list) {
     const row = document.createElement('tr');
     row.className = job.tone || 'yellow';
-    row.title = [job.url, job.proxy, job.status, job.progress, job.filePath].filter(Boolean).join('\n');
     const cells = [job.url, job.proxy || '', job.status || '', job.progress || ''];
     for (const [index, value] of cells.entries()) {
       const cell = document.createElement('td');
@@ -71,9 +75,8 @@ function renderJobs(list) {
       cell.textContent = value;
       row.append(cell);
     }
-    row.addEventListener('dblclick', () => {
-      if (job.tone === 'green' && job.filePath) window.webdl.openFile(job.filePath);
-    });
+    row.title = 'Double-click to open this captcha window, or the saved file.';
+    row.addEventListener('dblclick', () => window.webdl.showJob(job.id));
     jobs.append(row);
   }
 }
@@ -94,7 +97,7 @@ function applyState(state) {
   renderCounts(state);
   renderJobs(state.jobs || []);
   summary.textContent = state.summary || 'Idle';
-  setBusy(Boolean(state.busy), Boolean(state.testing));
+  setBusy(Boolean(state.busy), Boolean(state.testing), state.testingList);
   applying = false;
 }
 
@@ -128,7 +131,7 @@ window.webdl.onEvent((event) => {
       : '';
     return;
   }
-  if (event.type === 'busy') setBusy(Boolean(event.busy), Boolean(event.testing));
+  if (event.type === 'busy') setBusy(Boolean(event.busy), Boolean(event.testing), event.testingList);
 });
 
 function rememberProxies() {
@@ -153,7 +156,13 @@ start.addEventListener('click', async () => {
 
 cancel.addEventListener('click', () => window.webdl.cancel());
 fetchButton.addEventListener('click', () => window.webdl.fetchLists());
-testButton.addEventListener('click', () => window.webdl.test(formPayload()));
+async function runTest(list) {
+  const result = await window.webdl.test({ ...formPayload(), list });
+  if (result && !result.ok && result.message) summary.textContent = result.message;
+}
+
+testButton.addEventListener('click', () => runTest('untested'));
+testWorkingButton.addEventListener('click', () => runTest('working'));
 forgetButton.addEventListener('click', () => window.webdl.forget());
 forgetWorkingButton.addEventListener('click', () => window.webdl.forgetWorking());
 openFolder.addEventListener('click', () => window.webdl.openFolder(folder.value.trim()));
