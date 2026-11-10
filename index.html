@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>WebDL</title>
+  <style>
+    :root {
+      color: #1d1f23;
+      background: #e7ebf0;
+      font: 14px "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    button, input, textarea { font: inherit; }
+    button {
+      height: 32px;
+      padding: 0 12px;
+      border: 1px solid #b7c0cc;
+      border-radius: 4px;
+      background: #fff;
+      color: #1d1f23;
+    }
+    button:hover:not(:disabled) { background: #f4f7fb; }
+    button:disabled { color: #8b939e; background: #f3f5f8; }
+    input[type="text"], input[type="number"], textarea {
+      border: 1px solid #c5ced8;
+      border-radius: 4px;
+      background: #fff;
+      color: #1d1f23;
+    }
+    input[type="number"] { width: 72px; height: 32px; padding: 0 8px; }
+    textarea { width: 100%; resize: vertical; padding: 8px; }
+    .app { display: flex; flex-direction: column; height: 100vh; padding: 12px; gap: 10px; overflow: auto; }
+    .panel { background: #fff; border: 1px solid #d5dce4; border-radius: 6px; padding: 12px; }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    h2 { margin: 0 0 8px; font-size: 14px; }
+    .hint { margin: 0 0 8px; color: #4e5966; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+    #links { height: 74px; }
+    #summary, #counts, #check { color: #243041; }
+    .queue-wrap { overflow: auto; max-height: 240px; border: 1px solid #d5dce4; border-radius: 4px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #e4e9ef; vertical-align: top; }
+    th { position: sticky; top: 0; background: #f7f9fb; font-weight: 600; }
+    td.link { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tr.yellow { background: #f6e3a1; }
+    tr.green { background: #b7e4be; cursor: pointer; }
+    tr.red { background: #f3c1c1; }
+    .proxies { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-height: 0; }
+    .proxies textarea { height: 220px; }
+    progress { width: 180px; height: 16px; }
+    #log {
+      height: 150px;
+      margin: 0;
+      overflow: auto;
+      padding: 8px;
+      background: #1c2128;
+      color: #e6edf3;
+      border-radius: 6px;
+      font: 12px Consolas, monospace;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <section class="panel">
+      <h1>WebDL</h1>
+      <p class="hint">Paste a link or a list. Rapidgator waits out its timer, then opens the captcha for you to submit.</p>
+      <textarea id="links" placeholder="https://rapidgator.net/file/..."></textarea>
+      <div class="row">
+        <button id="start" type="button">Start downloads</button>
+        <button id="cancel" type="button" disabled>Cancel</button>
+        <button id="open-folder" type="button">Open folder</button>
+        <span id="summary">Idle</span>
+      </div>
+      <div class="row">
+        <label>Save to <input id="folder" type="text" size="48"></label>
+        <button id="browse" type="button">Browse</button>
+        <label>At once <input id="parallel" type="number" min="1" max="30" value="6"></label>
+        <label>Reuse delay <input id="reuse" type="number" min="0" max="3600" value="0"> seconds</label>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Queue</h2>
+      <div class="queue-wrap">
+        <table>
+          <thead>
+            <tr><th>Link</th><th>Proxy</th><th>Status</th><th>Progress</th></tr>
+          </thead>
+          <tbody id="jobs"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="proxies">
+      <div class="panel">
+        <h2>Untested</h2>
+        <textarea id="untested" spellcheck="false" placeholder="host:port or socks5://host:port"></textarea>
+      </div>
+      <div class="panel">
+        <h2>Working</h2>
+        <textarea id="working" spellcheck="false" placeholder="Downloads use this list"></textarea>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="row">
+        <button id="fetch" type="button">Fetch free lists</button>
+        <button id="test" type="button">Test proxies</button>
+        <button id="forget" type="button">Forget failures</button>
+        <progress id="bar" max="100" value="0" hidden></progress>
+        <span id="check"></span>
+        <span id="counts"></span>
+      </div>
+    </section>
+    <pre id="log"></pre>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

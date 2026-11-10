@@ -19,9 +19,9 @@ function stillWaiting(code) {
   return value.includes('wait') || value.includes('try again') || value.includes('specified time');
 }
 
-async function rapidgatorJson(proxy, pageUrl, endpoint, query, signal, cookie) {
+async function rapidgatorJson(proxy, pageUrl, endpoint, params, signal, cookie) {
   const address = new URL(endpoint, pageUrl);
-  address.search = query;
+  for (const [key, value] of Object.entries(params)) address.searchParams.set(key, value);
   const result = await requestText(proxy, address.href, {
     signal,
     cookie,
@@ -54,7 +54,7 @@ async function pushRapidgator(proxy, fileUrl, { signal, onWait } = {}) {
   const linkPath = matchGroup(html, /var\s+getDownloadUrl\s*=\s*'([^']*)'/) || '/download/AjaxGetDownloadLink';
   const captchaPath = matchGroup(html, /var\s+captchaUrl\s*=\s*'([^']*)'/) || '/download/captcha';
 
-  const started = await rapidgatorJson(proxy, page.url, startPath, `fid=${fid}`, signal, page.cookie);
+  const started = await rapidgatorJson(proxy, page.url, startPath, { fid }, signal, page.cookie);
   const state = String(started.data.state || '');
   if (state.toLowerCase() !== 'started') {
     const code = started.data.code ? ` (${started.data.code})` : '.';
@@ -72,7 +72,7 @@ async function pushRapidgator(proxy, fileUrl, { signal, onWait } = {}) {
   let refusal = '';
   for (let attempt = 1; attempt <= 12; attempt += 1) {
     wait(0);
-    const link = await rapidgatorJson(proxy, page.url, linkPath, `sid=${encodeURIComponent(sid)}`, signal, cookie);
+    const link = await rapidgatorJson(proxy, page.url, linkPath, { sid }, signal, cookie);
     cookie = link.cookie || cookie;
     if (String(link.data.state || '').toLowerCase() === 'done') {
       return { captchaUrl: new URL(captchaPath, page.url).href, cookie };
