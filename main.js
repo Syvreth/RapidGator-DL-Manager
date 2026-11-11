@@ -104,13 +104,22 @@ async function captchaState(win, turnstileBroken) {
 async function clickDownload(win) {
   if (!win || win.isDestroyed()) return false;
   try {
-    return await win.webContents.executeJavaScript(`(() => {
-      const button = document.querySelector('a.btn-download, .btn-download')
+    const box = await win.webContents.executeJavaScript(`(() => {
+      const button = document.querySelector('a.btn-download, a.btn.btn-download')
         || [...document.querySelectorAll('a,button')].find((el) => /click here to download/i.test(el.innerText || ''));
-      if (!button) return false;
-      button.click();
-      return true;
+      if (!button) return null;
+      button.scrollIntoView({ block: 'center', inline: 'center' });
+      const rect = button.getBoundingClientRect();
+      if (rect.width < 5 || rect.height < 5) return null;
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     })()`, true);
+    if (!box) return false;
+    const x = Math.round(box.x);
+    const y = Math.round(box.y);
+    win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+    win.webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    win.webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+    return true;
   } catch {
     return false;
   }
@@ -140,13 +149,19 @@ async function clickTurnstile(win) {
 async function clickSend(win, force) {
   if (!win || win.isDestroyed()) return false;
   try {
-    return await win.webContents.executeJavaScript(`(() => {
+      return await win.webContents.executeJavaScript(`(() => {
       const force = ${force ? 'true' : 'false'};
       const token = document.querySelector('[name="cf-turnstile-response"]');
+      const form = document.getElementById('captchaform') || document.forms.captchaform;
       if (!force && (!token || !token.value)) return false;
-      const button = document.querySelector('#submit-button, a#submit-button, button#submit-button')
-        || [...document.querySelectorAll('a,button,input')].find((el) => /^\\s*send\\s*$/i.test(el.innerText || el.value || ''));
+      if (form) {
+        form.submit();
+        return true;
+      }
+      const button = document.querySelector('#submit-button')
+        || [...document.querySelectorAll('a,button,input')].find((el) => /^\\s*send\\s*$/i.test((el.innerText || el.value || '').trim()));
       if (!button) return false;
+      if (typeof button.onclick === 'function') button.onclick();
       button.click();
       return true;
     })()`, true);
@@ -526,6 +541,7 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
       partition.setUserAgent(USER_AGENT);
       await applyCookies(partition, cookie);
       partition.on('will-download', (_event, item) => {
+        fileStarted = true;
         const name = safeName(item.getFilename() || 'download');
         fs.mkdirSync(folder, { recursive: true });
         const dest = uniquePath(folder, name);
@@ -571,7 +587,9 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
       let failedAt = 0;
       let shown = false;
       let sent = false;
-      let downloadClicked = false;
+      let downloadTries = 0;
+      let lastDownloadClick = 0;
+      let fileStarted = false;
       let sawWait = false;
       let clickedBox = false;
       let sendRetries = 0;
@@ -588,6 +606,16 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         win.focus();
         markJob(job, { status: 'Downloading', progress: 'Waiting for captcha', tone: 'yellow' });
         log(`Captcha needs you on ${proxy.display}.`);
+      };
+      const tryDownload = async () => {
+        if (fileStarted || downloadTries >= 4) return false;
+        if (Date.now() - lastDownloadClick < 3000) return false;
+        const clicked = await clickDownload(win);
+        if (!clicked) return false;
+        downloadTries += 1;
+        lastDownloadClick = Date.now();
+        log(`Clicking Click here to download through ${proxy.display}.`);
+        return true;
       };
       const look = async () => {
         if (settled) return;
@@ -613,14 +641,11 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         }
         if (kind === 'solved') {
           failedAt = 0;
-          if (!sent) {
+          const downloading = await tryDownload();
+          if (!downloading && !sent) {
             sent = true;
             const clicked = await clickSend(win, false);
-            if (clicked) log(`Captcha passed on ${proxy.display}. Sending the download.`);
-          }
-          if (!shown && !downloadClicked) {
-            downloadClicked = await clickDownload(win);
-            if (downloadClicked) log(`Starting the file through ${proxy.display}.`);
+            if (clicked) log(`Captcha passed on ${proxy.display}. Sending the form.`);
           }
           return;
         }
@@ -653,11 +678,8 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
           return;
         }
         failedAt = 0;
-        if (!shown && !downloadClicked) {
-          downloadClicked = await clickDownload(win);
-          if (downloadClicked) log(`Starting the file through ${proxy.display}.`);
-        }
-        if (shown || downloadClicked) return;
+        if (!fileStarted) await tryDownload();
+        if (shown || fileStarted) return;
         markJob(job, { status: 'Downloading', progress: 'Checking captcha', tone: 'yellow' });
         if (kind !== 'verifying' && Date.now() - openedAt > 12000) reveal('Click the captcha box, then press Send.');
         else if (kind === 'verifying' && Date.now() - openedAt > 25000) reveal('Click the captcha box, then press Send.');
