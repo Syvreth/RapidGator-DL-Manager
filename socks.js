@@ -642,10 +642,13 @@ class SocksBridge {
     this.live.push(tunnel);
     remote.on('error', () => tunnel.destroy());
     browser.on('error', () => tunnel.destroy());
+    browser.setTimeout(0);
+    remote.setTimeout(0);
+    remote.setKeepAlive?.(true, 10000);
     if (!preface) browser.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     else remote.write(preface);
-    pump(browser, remote);
-    pump(remote, browser);
+    pump(browser, remote, false);
+    pump(remote, browser, true);
     browser.resume();
     const drop = () => {
       this.live = this.live.filter((item) => item !== tunnel);
@@ -766,7 +769,7 @@ function splitHost(value, fallbackPort) {
   return value ? { host: value, port: fallbackPort } : null;
 }
 
-function pump(from, to) {
+function pump(from, to, endOther) {
   const onData = (chunk) => {
     if (to.destroyed || to.writableEnded) return;
     const ok = to.write(chunk);
@@ -777,9 +780,10 @@ function pump(from, to) {
     if (!from.destroyed) from.resume();
   });
   from.on('end', () => {
-    if (!to.destroyed && !to.writableEnded) to.end();
+    if (endOther && !to.destroyed && !to.writableEnded) to.end();
   });
-  from.on('error', () => {
+  from.on('error', (error) => {
+    if (error && (error.code === 'ECONNRESET' || error.code === 'EPIPE') && to.writableEnded) return;
     if (!to.destroyed) to.destroy();
   });
 }

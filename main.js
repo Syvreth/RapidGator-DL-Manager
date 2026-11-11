@@ -27,7 +27,7 @@ app.userAgentFallback = USER_AGENT;
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
 app.commandLine.appendSwitch('enable-webgl');
-app.commandLine.appendSwitch('disable-features', 'ThirdPartyStoragePartitioning,TrackingProtection3pcd');
+app.commandLine.appendSwitch('disable-features', 'ThirdPartyStoragePartitioning,TrackingProtection3pcd,CalculateNativeWinOcclusion');
 
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 const proxyPath = () => path.join(app.getPath('userData'), 'proxies.json');
@@ -583,6 +583,8 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
           backgroundThrottling: false,
         },
       });
+      win.setBounds({ x: -3200, y: -3200, width: 1040, height: 780 });
+      win.webContents.setBackgroundThrottling(false);
       openCaptcha.set(job.id, win);
       let failedAt = 0;
       let shown = false;
@@ -597,15 +599,22 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
       let turnstileBroken = false;
       const openedAt = Date.now();
       const reveal = (title) => {
-        if (shown || !win || win.isDestroyed()) return;
+        if (!win || win.isDestroyed()) return;
         shown = true;
         win.setOpacity(1);
         win.setSkipTaskbar(false);
         win.setTitle(title);
+        win.center();
         win.show();
         win.focus();
         markJob(job, { status: 'Downloading', progress: 'Waiting for captcha', tone: 'yellow' });
         log(`Captcha needs you on ${proxy.display}.`);
+      };
+      const conceal = () => {
+        if (!win || win.isDestroyed()) return;
+        shown = false;
+        win.setSkipTaskbar(true);
+        win.setBounds({ x: -3200, y: -3200, width: 1040, height: 780 });
       };
       const tryDownload = async () => {
         if (fileStarted || downloadTries >= 4) return false;
@@ -639,10 +648,11 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
             return;
           }
         }
-        if (kind === 'solved') {
+        if (kind === 'solved' || fileStarted) {
           failedAt = 0;
+          conceal();
           const downloading = await tryDownload();
-          if (!downloading && !sent) {
+          if (!downloading && !sent && kind === 'solved') {
             sent = true;
             const clicked = await clickSend(win, false);
             if (clicked) log(`Captcha passed on ${proxy.display}. Sending the form.`);
@@ -679,10 +689,9 @@ function openCaptchaWindow({ proxy, url, cookie, folder, signal, job }) {
         }
         failedAt = 0;
         if (!fileStarted) await tryDownload();
+        if (fileStarted) conceal();
         if (shown || fileStarted) return;
         markJob(job, { status: 'Downloading', progress: 'Checking captcha', tone: 'yellow' });
-        if (kind !== 'verifying' && Date.now() - openedAt > 12000) reveal('Click the captcha box, then press Send.');
-        else if (kind === 'verifying' && Date.now() - openedAt > 25000) reveal('Click the captcha box, then press Send.');
       };
       win.webContents.on('console-message', (_event, _level, message) => {
         const text = String(message || '');
